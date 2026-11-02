@@ -667,7 +667,8 @@ export async function dispatchWebhook(invoice: any, txTime: string, retryCount =
   console.log(`[Webhook] Dispatching callback for invoice ${invoice.id} (Attempt ${retryCount + 1})...`);
 
   // Resolve target url and signing secret dynamically based on user creator settings
-  let secretKey = Deno.env.get("WEBHOOK_SECRET") || "qbiz_secret_key_hmac_2026";
+  // [EMPLOYR PATCH P4] Tanpa secret bawaan publik: tanpa secret, webhook tidak dikirim.
+  let secretKey = Deno.env.get("WEBHOOK_SECRET") || "";
   let targetUrl = invoice.callbackUrl;
 
   if (invoice.userId) {
@@ -685,6 +686,11 @@ export async function dispatchWebhook(invoice: any, txTime: string, retryCount =
     } catch (err: any) {
       console.error(`[Webhook] Failed querying creator user for invoice ${invoice.id}:`, err.message);
     }
+  }
+
+  if (!secretKey) {
+    console.error(`[Webhook] Aborted dispatching invoice ${invoice.id}: no signing secret configured (set WEBHOOK_SECRET or a webhook secret on the creator account).`);
+    return;
   }
 
   if (!targetUrl) {

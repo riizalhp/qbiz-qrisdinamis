@@ -117,6 +117,66 @@ export function generateDynamicQRIS(staticPayload: string, amount: number, _invo
   return result + checksum;
 }
 
+export type QrisValidation =
+  | { ok: true; merchantName: string; city: string }
+  | { ok: false; reason: 'EMPTY' | 'NOT_QRIS' | 'BAD_STRUCTURE' | 'BAD_CRC' | 'MISSING_FIELDS' };
+
+/**
+ * [EMPLOYR PATCH P2] Validasi payload QRIS statis sebelum disimpan sebagai data merchant.
+ * Tujuan: payload yang rusak, terpotong, atau bukan QRIS tidak boleh pernah dipakai membuat QR pembayaran.
+ * Memeriksa: awalan 000201, struktur TLV utuh sampai akhir, CRC16 pada tag 63 cocok, dan field wajib
+ * (tag 52 kategori, 53 mata uang, 58 negara, 59 nama merchant, 60 kota) ada.
+ */
+export function validateStaticQrisPayload(payload: string | null | undefined): QrisValidation {
+  const raw = (payload ?? '').trim();
+  if (!raw) return { ok: false, reason: 'EMPTY' };
+  if (!raw.startsWith('000201')) return { ok: false, reason: 'NOT_QRIS' };
+
+  // Struktur TLV harus habis tepat di akhir string (tidak ada sisa/terpotong)
+  let index = 0;
+  const tags = new Map<string, string>();
+  while (index < raw.length) {
+    if (index + 4 > raw.length) return { ok: false, reason: 'BAD_STRUCTURE' };
+    const tag = raw.slice(index, index + 2);
+    const lenStr = raw.slice(index + 2, index + 4);
+    if (!/^\d{2}$/.test(tag) || !/^\d{2}$/.test(lenStr)) return { ok: false, reason: 'BAD_STRUCTURE' };
+    const length = parseInt(lenStr, 10);
+    index += 4;
+    if (index + length > raw.length) return { ok: false, reason: 'BAD_STRUCTURE' };
+    tags.set(tag, raw.slice(index, index + length));
+    index += length;
+  }
+
+  // CRC: tag 63 harus berisi 4 heks dan menjadi elemen terakhir
+  const crc = tags.get('63');
+  if (!crc || crc.length !== 4 || !raw.endsWith(`6304${crc}`)) return { ok: false, reason: 'BAD_CRC' };
+  const expected = computeCRC16(raw.slice(0, raw.length - 4));
+  if (expected !== crc.toUpperCase()) return { ok: false, reason: 'BAD_CRC' };
+
+  const merchantName = tags.get('59');
+  const city = tags.get('60');
+  if (!tags.get('52') || !tags.get('53') || !tags.get('58') || !merchantName || !city) {
+    return { ok: false, reason: 'MISSING_FIELDS' };
+  }
+  return { ok: true, merchantName, city };
+}
+
+/** Pesan galat yang bisa ditampilkan ke admin untuk setiap alasan validasi. */
+export function describeQrisValidationError(reason: Exclude<QrisValidation, { ok: true }>['reason']): string {
+  switch (reason) {
+    case 'EMPTY':
+      return 'Data QRIS kosong. Unggah gambar QRIS yang terbaca, atau tempel teks QRIS (diawali 000201...).';
+    case 'NOT_QRIS':
+      return 'Teks tersebut bukan QRIS (harus diawali 000201). Scan stiker QRIS dengan pembaca QR lalu tempel hasilnya.';
+    case 'BAD_STRUCTURE':
+      return 'Teks QRIS terpotong atau rusak. Salin ulang seluruh teks hasil scan.';
+    case 'BAD_CRC':
+      return 'Checksum QRIS tidak cocok, teks kemungkinan salah salin. Salin ulang seluruh teks hasil scan.';
+    case 'MISSING_FIELDS':
+      return 'QRIS tidak lengkap (tidak ada kategori, mata uang, negara, nama merchant, atau kota).';
+  }
+}
+
 export async function decodeQRISFromImage(filePath: string): Promise<string | null> {
   try {
     const image = await Jimp.read(filePath);

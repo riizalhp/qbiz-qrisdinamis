@@ -1,4 +1,5 @@
-FROM denoland/deno:debian
+# [EMPLOYR PATCH P9] Base image dikunci ke digest (tag debian-2.9.8). Naikkan versinya secara sadar, bukan otomatis.
+FROM denoland/deno:debian-2.9.8@sha256:a0d88a7fcbd44f062cba2748e19df67d30290ad12aa203c7c1e0b12462c483f0
 
 # Install chromium and standard dependencies for headless Puppeteer
 RUN apt-get update && apt-get install -y \

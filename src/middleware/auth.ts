@@ -263,17 +263,23 @@ export async function verifyPassword(password: string, storedHash: string): Prom
 export async function authMiddleware(c: any, next: any) {
   const url = new URL(c.req.url);
   
+  // [EMPLOYR PATCH P7] Rekonsiliasi manual menandai invoice LUNAS, jadi harus memuat sesi admin lalu
+  // diputuskan oleh requireRole di rutenya. Semua rute lain di bawah /api/v1/invoices tetap seperti upstream.
+  const isManualReconcile = url.pathname.startsWith('/api/v1/invoices/') && url.pathname.endsWith('/reconcile');
+
   // Skip auth for login, static assets, public pay page, API public endpoints, and LLM indexing files
   if (
-    url.pathname === '/login' || 
-    url.pathname === '/docs' ||
-    url.pathname === '/robots.txt' ||
-    url.pathname === '/llms.txt' ||
-    url.pathname === '/llms-full.txt' ||
-    url.pathname.startsWith('/static/') || 
-    url.pathname.startsWith('/pay/') || // Public secure pay page
-    url.pathname.startsWith('/api/v1/invoices') || // API invoices are auth'd via Bearer key or public status check
-    url.pathname.startsWith('/api/v1/developer/test-webhook') // Test webhook handles own auth
+    !isManualReconcile && (
+      url.pathname === '/login' ||
+      url.pathname === '/docs' ||
+      url.pathname === '/robots.txt' ||
+      url.pathname === '/llms.txt' ||
+      url.pathname === '/llms-full.txt' ||
+      url.pathname.startsWith('/static/') ||
+      url.pathname.startsWith('/pay/') || // Public secure pay page
+      url.pathname.startsWith('/api/v1/invoices') || // API invoices are auth'd via Bearer key or public status check
+      url.pathname.startsWith('/api/v1/developer/test-webhook') // Test webhook handles own auth
+    )
   ) {
     return await next();
   }

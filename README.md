@@ -268,17 +268,9 @@ Interactive Scalar API documentation is served directly at `/docs` (configured v
 
 ---
 
-## 🔑 Default Seed Demo Accounts
+## Initial admin account (Employr fork)
 
-On application startup, default accounts are seeded into the database for quick evaluation of access controls.
-
-| Role Name | Demo Email | Demo Password | Default API Key / Webhook |
-| :--- | :--- | :--- | :--- |
-| **Super Admin** | `superadmin@qbiz.com` | `SuperQBiz2026` | `qbiz_api_key_live_2026_w8a2b3d9x7c` |
-| **Admin Operations** | `admin@qbiz.com` | `AdminQBiz2026` | `qbiz_api_key_live_2026_admin` |
-| **Regional Admin** | `regional@qbiz.com` | `RegionalQBiz2026` | `qbiz_api_key_live_2026_regional` |
-| **Merchant Owner** | `merchant@qbiz.com` | `MerchantQBiz2026` | `qbiz_api_key_live_2026_merchant` |
-| **Cashier / Employee** | `karyawan@qbiz.com` | `EmployeeQBiz2026` | `qbiz_api_key_live_2026_karyawan` |
+The upstream demo accounts and public API keys were removed (see PATCHES.md, P1). On first boot, when the users table is empty, one SUPER_ADMIN is created from `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD` (min. 12 characters). Remove the password from the environment after the first login.
 
 ---
 

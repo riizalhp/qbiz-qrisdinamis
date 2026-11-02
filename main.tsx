@@ -20,7 +20,7 @@ import { eq, desc, inArray, and, or, sql } from 'drizzle-orm';
 import { triggerGoBizOTP, verifyGoBizOTP, startMerchantListener, stopMerchantListener, syncMerchantMutations, dispatchWebhook, closeAllListeners, activeListeners } from './worker/puppeteer-listener.ts';
 import { authMiddleware, requireRole, hashPassword, verifyPassword, COOKIE_SECRET, UserSession, MerchantContext } from './src/middleware/auth.ts';
 import { securityHeadersMiddleware, createRateLimiter, bodySizeLimiter } from './src/middleware/security.ts';
-import { generateDynamicQRIS, decodeQRISFromImage } from './src/utils/qris.ts';
+import { generateDynamicQRIS, decodeQRISFromImage, validateStaticQrisPayload, describeQrisValidationError } from './src/utils/qris.ts';
 import { dispatchMerchantNotifications, testChannelNotification, DEFAULT_TEMPLATES, isValidOutboundUrl } from './src/services/notification.ts';
 import { getSystemSettings, updateSystemSettings, invalidateSettingsCache, SystemSettingsConfig } from './src/services/settings.ts';
 import { createApiKey, listApiKeys, revokeApiKey, deleteApiKey, verifyApiKeyAndScope, AVAILABLE_SCOPES, ApiKeyRecord } from './src/services/api-keys.ts';
@@ -28,6 +28,16 @@ import { createWebhookEndpoint, listWebhookEndpoints, deleteWebhookEndpoint, tog
 import { migrate } from 'npm:drizzle-orm/postgres-js/migrator';
 
 const DEFAULT_MOCK_STATIC_QRIS = "00020101021138590014ID.CO.QRIS.WWW0215ID10200845344330303UMI51440014ID.CO.QRIS.WWW0215ID10200845344330303UMI5204581253033605802ID5920Resto Ayam Bakar Cbk6009Mojokerto6105613006304D116";
+
+// [EMPLOYR PATCH] Satu-satunya pintu untuk perilaku tiruan/sandbox global.
+const isSandboxMode = () => Deno.env.get("SANDBOX_MODE") === "true";
+
+// [EMPLOYR PATCH P10] Upstream memakai ekstensi dari nama berkas unggahan apa adanya ke dalam path tujuan
+// (nama seperti "x.png/../../y" bisa keluar dari folder uploads). Ekstensi dibatasi pada daftar gambar.
+const safeImageExt = (fileName: string): string => {
+  const raw = (fileName.split('.').pop() || '').toLowerCase();
+  return ['png', 'jpg', 'jpeg', 'webp'].includes(raw) ? raw : 'png';
+};
 
 export const app = new Hono();
 
@@ -120,106 +130,47 @@ async function runAutoMigrations() {
   }
 }
 
+// [EMPLOYR PATCH P1] Upstream membuat 5 akun dengan kata sandi publik, API key publik, URL webhook.site, dan merchant tiruan
+// saat tabel users kosong. Diganti: satu SUPER_ADMIN dari env, tanpa data demo. Tidak ada yang dibuat bila env tidak diisi.
 async function seedDefaultUsers() {
   try {
-    const userList = await db.select().from(users);
-    if (userList.length === 0) {
-      console.log('[Seed] Seeding default RBAC users into database...');
-      
-      const seedUsers = [
-        {
-          id: 'usr_superadmin',
-          name: 'Adrian Ryan (SA)',
-          email: 'superadmin@qbiz.com',
-          password: await hashPassword('SuperQBiz2026'),
-          role: 'SUPER_ADMIN' as const,
-          merchantId: null,
-          apiKey: 'qbiz_api_key_live_2026_w8a2b3d9x7c',
-          webhookUrl: 'https://webhook.site/df038cb2-2c6e-4ad3-9ef4-8c813a3028d0',
-          webhookSecret: 'my_secret_signing_hmac_key_2026'
-        },
-        {
-          id: 'usr_admin',
-          name: 'QBiz Admin Operations',
-          email: 'admin@qbiz.com',
-          password: await hashPassword('AdminQBiz2026'),
-          role: 'ADMIN' as const,
-          merchantId: null,
-          apiKey: 'qbiz_api_key_live_2026_admin',
-          webhookUrl: null,
-          webhookSecret: null
-        },
-        {
-          id: 'usr_regional',
-          name: 'Budi Regional Manager',
-          email: 'regional@qbiz.com',
-          password: await hashPassword('RegionalQBiz2026'),
-          role: 'REGIONAL_ADMIN' as const,
-          merchantId: null,
-          apiKey: 'qbiz_api_key_live_2026_regional',
-          webhookUrl: null,
-          webhookSecret: null
-        },
-        {
-          id: 'usr_merchant',
-          name: 'Toko Mojokerto Owner',
-          email: 'merchant@qbiz.com',
-          password: await hashPassword('MerchantQBiz2026'),
-          role: 'MERCHANT' as const,
-          merchantId: 'mrc_toko_1', // Associated with mock merchant
-          apiKey: 'qbiz_api_key_live_2026_merchant',
-          webhookUrl: null,
-          webhookSecret: null
-        },
-        {
-          id: 'usr_karyawan',
-          name: 'Siti Kasir Toko',
-          email: 'karyawan@qbiz.com',
-          password: await hashPassword('EmployeeQBiz2026'),
-          role: 'MERCHANT_EMPLOYEE' as const,
-          merchantId: 'mrc_toko_1',
-          apiKey: 'qbiz_api_key_live_2026_karyawan',
-          webhookUrl: null,
-          webhookSecret: null
-        }
-      ];
+    const userList = await db.select().from(users).limit(1);
+    if (userList.length > 0) return;
 
-      // Add a mock merchant to anchor seed associations if merchants empty
-      const mrcList = await db.select().from(merchants);
-      if (mrcList.length === 0) {
-        await db.insert(merchants).values({
-          id: 'mrc_toko_1',
-          name: 'Warung Kopi Mojokerto',
-          phoneNumber: '081234567890',
-          qrisImageUrl: 'https://picsum.photos/seed/qris1/300/300',
-          sessionFilePath: 'sessions/mrc_toko_1.json',
-          status: 'ACTIVE'
-        });
-        
-        await db.insert(merchants).values({
-          id: 'mrc_toko_2',
-          name: 'Resto Ayam Bakar Cobek',
-          phoneNumber: '089988776655',
-          qrisImageUrl: 'https://picsum.photos/seed/qris2/300/300',
-          sessionFilePath: 'sessions/mrc_toko_2.json',
-          status: 'NEEDS_OTP'
-        });
-      }
-
-      for (const u of seedUsers) {
-        await db.insert(users).values(u);
-      }
-
-      // Link Regional Admin to mrc_toko_1 and mrc_toko_2
-      await db.insert(regionalAdminMerchants).values([
-        { userId: 'usr_regional', merchantId: 'mrc_toko_1' },
-        { userId: 'usr_regional', merchantId: 'mrc_toko_2' }
-      ]);
-
-      console.log('[Seed] Seeding completed successfully.');
+    const email = (Deno.env.get('INITIAL_ADMIN_EMAIL') || '').trim().toLowerCase();
+    const password = Deno.env.get('INITIAL_ADMIN_PASSWORD') || '';
+    if (!email || !password) {
+      console.warn('[Seed] Tabel users kosong dan INITIAL_ADMIN_EMAIL / INITIAL_ADMIN_PASSWORD belum diisi. Tidak ada akun yang dibuat.');
+      return;
     }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      console.error('[Seed] INITIAL_ADMIN_EMAIL tidak valid. Tidak ada akun yang dibuat.');
+      return;
+    }
+    if (password.length < 12) {
+      console.error('[Seed] INITIAL_ADMIN_PASSWORD minimal 12 karakter. Tidak ada akun yang dibuat.');
+      return;
+    }
+
+    const randomKey = (prefix: string) => {
+      const bytes = crypto.getRandomValues(new Uint8Array(24));
+      return prefix + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    };
+
+    await db.insert(users).values({
+      id: 'usr_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+      name: 'Administrator',
+      email,
+      password: await hashPassword(password),
+      role: 'SUPER_ADMIN' as const,
+      merchantId: null,
+      apiKey: randomKey('qbiz_live_'),
+      webhookUrl: null,
+      webhookSecret: randomKey('whsec_'),
+    });
+    console.log('[Seed] Akun SUPER_ADMIN awal dibuat dari env. Hapus INITIAL_ADMIN_PASSWORD dari env setelah login pertama.');
   } catch (err: any) {
-    console.warn('[Seed] Seeding skipped (or database connection not ready):', err.message);
+    console.warn('[Seed] Seeding dilewati (atau koneksi database belum siap):', err.message);
   }
 }
 
@@ -422,6 +373,10 @@ app.get('/sw.js', (_c) => {
 
 // Scalar API Reference Route
 app.get('/docs', (c) => {
+  // [EMPLOYR PATCH P5] Halaman ini memuat skrip CDN tanpa versi di origin dashboard. Mati kecuali ENABLE_API_DOCS=true.
+  if (Deno.env.get('ENABLE_API_DOCS') !== 'true') {
+    return c.text('Not Found', 404);
+  }
   return c.html(`
     <!DOCTYPE html>
     <html>
@@ -737,11 +692,9 @@ app.get('/merchants', requireRole(['SUPER_ADMIN', 'ADMIN', 'REGIONAL_ADMIN']), a
     } else {
       list = await db.select().from(merchants);
     }
-  } catch (_e) {
-    list = [
-      { id: 'mrc_toko_1', name: 'Warung Kopi Mojokerto', phoneNumber: '081234567890', qrisImageUrl: 'https://picsum.photos/seed/qris1/300/300', status: 'ACTIVE' as const, todayTransactions: 12, lastSync: '2026-08-03 10:20:15' },
-      { id: 'mrc_toko_2', name: 'Resto Ayam Bakar Cobek', phoneNumber: '089988776655', qrisImageUrl: 'https://picsum.photos/seed/qris2/300/300', status: 'NEEDS_OTP' as const, todayTransactions: 0, lastSync: '2026-08-03 09:12:44' }
-    ];
+  } catch (e: any) {
+    console.error('[Merchants] gagal membaca daftar merchant:', e?.message);
+    list = [];
   }
 
   const formattedMerchants = list.map(m => ({
@@ -769,8 +722,8 @@ app.get('/transactions', requireRole(['SUPER_ADMIN', 'ADMIN', 'REGIONAL_ADMIN', 
   const accessibleMerchants = ((c as any).get('accessibleMerchants') as MerchantContext[]) || [];
   const settings = await getSystemSettings();
   
-  let txList = [];
-  let merchantList = [];
+  let txList: any[] = [];
+  let merchantList: any[] = [];
 
   try {
     const dbMerchants = await db.select().from(merchants);
@@ -826,15 +779,10 @@ app.get('/transactions', requireRole(['SUPER_ADMIN', 'ADMIN', 'REGIONAL_ADMIN', 
         customerPhone: inv.customerPhone || ''
       };
     });
-  } catch (_e) {
-    merchantList = [
-      { id: 'mrc_toko_1', name: 'Warung Kopi Mojokerto' },
-      { id: 'mrc_toko_2', name: 'Resto Ayam Bakar Cobek' }
-    ];
-    txList = [
-      { id: 'inv_10923840', merchantId: 'mrc_toko_1', merchantName: 'Warung Kopi Mojokerto', orderId: 'ORDER-100230', baseAmount: 50000, uniqueCode: 123, totalAmount: 50123, status: 'PAID' as const, webhookStatus: '200 OK' as const, timestamp: '2026-08-03 10:28:15' },
-      { id: 'inv_10923841', merchantId: 'mrc_toko_1', merchantName: 'Warung Kopi Mojokerto', orderId: 'ORDER-100231', baseAmount: 12000, uniqueCode: 15, totalAmount: 12015, status: 'PENDING' as const, webhookStatus: 'N/A' as const, timestamp: '2026-08-03 10:30:00' }
-    ];
+  } catch (e: any) {
+    console.error('[Transactions] gagal membaca transaksi:', e?.message);
+    merchantList = [];
+    txList = [];
   }
 
   (c as any).set('title', 'Live Transaction Monitor');
@@ -940,10 +888,9 @@ app.get('/users', requireRole(['SUPER_ADMIN', 'ADMIN', 'REGIONAL_ADMIN', 'MERCHA
         mappedMerchantsCount: mappedCount
       };
     });
-  } catch (_e) {
-    merchantList = [
-      { id: 'mrc_toko_1', name: 'Warung Kopi Mojokerto' }
-    ];
+  } catch (e: any) {
+    console.error('[Users] gagal membaca daftar pengguna:', e?.message);
+    merchantList = [];
     userList = [
       { id: currentUser.id, name: currentUser.name, email: currentUser.email, role: currentUser.role as any, merchantName: null, mappedMerchantsCount: 0 }
     ];
@@ -1178,7 +1125,7 @@ app.post('/api/v1/users/:id/reset-password', requireRole(['SUPER_ADMIN', 'ADMIN'
 app.get('/api/v1/transactions', async (c) => {
   const user = (c as any).get('user') as UserSession;
   const activeMerchant = (c as any).get('activeMerchant') as MerchantContext | null;
-  let txList = [];
+  let txList: any[] = [];
   
   try {
     const dbMerchants = await db.select().from(merchants);
@@ -1221,15 +1168,9 @@ app.get('/api/v1/transactions', async (c) => {
         customerPhone: inv.customerPhone || ''
       };
     });
-  } catch (_e) {
-    // Mock polling data
-    txList = [
-      { id: 'inv_10923840', merchantId: 'mrc_toko_1', merchantName: 'Warung Kopi Mojokerto', orderId: 'ORDER-100230', baseAmount: 50000, uniqueCode: 123, totalAmount: 50123, status: 'PAID' as const, webhookStatus: '200 OK' as const, timestamp: '2026-08-03 10:28:15' },
-      { id: 'inv_10923841', merchantId: 'mrc_toko_1', merchantName: 'Warung Kopi Mojokerto', orderId: 'ORDER-100231', baseAmount: 12000, uniqueCode: 15, totalAmount: 12015, status: 'PENDING' as const, webhookStatus: 'N/A' as const, timestamp: '2026-08-03 10:30:00' }
-    ];
-    if (user.role === 'MERCHANT' || user.role === 'MERCHANT_EMPLOYEE') {
-      txList = txList.filter(tx => tx.merchantId === 'mrc_toko_1');
-    }
+  } catch (e: any) {
+    console.error('[Transactions] polling gagal:', e?.message);
+    return c.json({ success: false, error: 'Gagal membaca transaksi.' }, 500);
   }
 
   return c.json({ success: true, transactions: txList });
@@ -1238,7 +1179,7 @@ app.get('/api/v1/transactions', async (c) => {
 // API: Trigger GoBiz WhatsApp OTP (supports both /otp and /otp/request)
 const handleOtpRequest = async (c: any) => {
   const id = c.req.param('id');
-  if (id.startsWith('mrc_toko')) {
+  if (isSandboxMode() && id.startsWith('mrc_toko')) { // [EMPLOYR PATCH P6] jalur tiruan hanya di mode sandbox
     return c.json({ success: true });
   }
   const result = await triggerGoBizOTP(id);
@@ -1253,7 +1194,7 @@ const handleOtpVerify = async (c: any) => {
   const body = await c.req.json();
   const otpCode = body.otp;
 
-  if (id.startsWith('mrc_toko')) {
+  if (isSandboxMode() && id.startsWith('mrc_toko')) { // [EMPLOYR PATCH P6] jalur tiruan hanya di mode sandbox
     await db.update(merchants)
       .set({ status: 'ACTIVE' })
       .where(eq(merchants.id, id));
@@ -1312,7 +1253,7 @@ app.post('/api/v1/merchants/:id/disconnect', requireRole(['SUPER_ADMIN', 'ADMIN'
   console.log(`[API] Disconnecting merchant account: ${id}`);
 
   // In mock flow
-  if (id.startsWith('mrc_toko')) {
+  if (isSandboxMode() && id.startsWith('mrc_toko')) { // [EMPLOYR PATCH P6] jalur tiruan hanya di mode sandbox
     await db.update(merchants)
       .set({ status: 'NEEDS_OTP' })
       .where(eq(merchants.id, id));
@@ -1556,7 +1497,7 @@ app.post('/api/v1/merchants/:id/edit', requireRole(['SUPER_ADMIN', 'ADMIN']), as
     if (logoImage && typeof logoImage === 'object' && typeof logoImage.name === 'string' && logoImage.size > 0) {
       const tempDir = './static/uploads';
       await Deno.mkdir(tempDir, { recursive: true });
-      const logoExt = logoImage.name.split('.').pop() || 'png';
+      const logoExt = safeImageExt(logoImage.name);
       const logoFilePath = `${tempDir}/logo_${id}.${logoExt}`;
       finalLogoUrl = `/static/uploads/logo_${id}.${logoExt}`;
       const logoBuffer = await logoImage.arrayBuffer();
@@ -1568,7 +1509,7 @@ app.post('/api/v1/merchants/:id/edit', requireRole(['SUPER_ADMIN', 'ADMIN']), as
     if (qrisImage && typeof qrisImage === 'object' && typeof qrisImage.name === 'string' && qrisImage.size > 0) {
       const tempDir = './static/uploads';
       await Deno.mkdir(tempDir, { recursive: true });
-      const ext = qrisImage.name.split('.').pop() || 'png';
+      const ext = safeImageExt(qrisImage.name);
       const filePath = `${tempDir}/${id}.${ext}`;
       fileUrl = `/static/uploads/${id}.${ext}`;
 
@@ -1592,6 +1533,17 @@ app.post('/api/v1/merchants/:id/edit', requireRole(['SUPER_ADMIN', 'ADMIN']), as
       finalQrisPayload = qrisPayload;
     }
 
+    // [EMPLOYR PATCH P2] Payload yang akan disimpan wajib sah. Perubahan yang tidak menyentuh QRIS dan
+    // merchant lama tanpa QRIS (data warisan) tetap boleh disimpan, tetapi tidak boleh diisi nilai tiruan.
+    const qrisChanged = finalQrisPayload !== currentMerchant.qrisPayload;
+    if (qrisChanged) {
+      const sandboxOnlyEdit = Deno.env.get("SANDBOX_MODE") === "true" && finalQrisPayload === DEFAULT_MOCK_STATIC_QRIS;
+      const editCheck = validateStaticQrisPayload(finalQrisPayload);
+      if (!sandboxOnlyEdit && !editCheck.ok) {
+        return c.text(`QRIS tidak dapat disimpan: ${describeQrisValidationError(editCheck.reason)}`, 400);
+      }
+    }
+
     // 4. Update merchant row
     await db.update(merchants).set({
       name: name || currentMerchant.name,
@@ -1602,7 +1554,9 @@ app.post('/api/v1/merchants/:id/edit', requireRole(['SUPER_ADMIN', 'ADMIN']), as
     }).where(eq(merchants.id, id));
 
   } catch (err: any) {
+    // [EMPLOYR PATCH P3] Upstream menelan galat lalu tetap mengalihkan seolah sukses.
     console.error(`[API] Edit merchant failed for ${id}:`, err);
+    return c.text('Gagal menyimpan perubahan merchant. Coba lagi atau periksa log server.', 500);
   }
 
   return c.redirect('/merchants');
@@ -1627,14 +1581,20 @@ app.post('/api/v1/merchants', requireRole(['SUPER_ADMIN', 'ADMIN', 'REGIONAL_ADM
   const tempDir = './static/uploads';
   await Deno.mkdir(tempDir, { recursive: true });
 
-  let fileUrl: string = DEFAULT_MOCK_STATIC_QRIS;
+  // [EMPLOYR PATCH P2] Upstream mengisi QRIS tiruan ("Resto Ayam Bakar Cbk") bila unggahan gagal dibaca,
+  // sehingga pembayaran bisa mengalir ke QRIS orang lain. Sekarang kosong sampai terbukti sah.
+  let fileUrl: string = '';
   let finalQrisPayload = qrisPayload;
 
   // Process QRIS Image Upload if provided
+  let uploadedQrisPath: string | null = null;
   if (qrisImage && typeof qrisImage === 'object' && typeof qrisImage.name === 'string' && qrisImage.size > 0) {
-    const ext = qrisImage.name.split('.').pop() || 'png';
+    // [EMPLOYR PATCH P2] Ekstensi dibatasi pada gambar; upstream memakai ekstensi dari nama berkas apa adanya.
+    const rawExt = (qrisImage.name.split('.').pop() || '').toLowerCase();
+    const ext = ['png', 'jpg', 'jpeg', 'webp'].includes(rawExt) ? rawExt : 'png';
     const filePath = `${tempDir}/${newId}.${ext}`;
     fileUrl = `/static/uploads/${newId}.${ext}`;
+    uploadedQrisPath = filePath;
 
     const arrayBuffer = await qrisImage.arrayBuffer();
     await Deno.writeFile(filePath, new Uint8Array(arrayBuffer));
@@ -1652,15 +1612,24 @@ app.post('/api/v1/merchants', requireRole(['SUPER_ADMIN', 'ADMIN', 'REGIONAL_ADM
     }
   }
 
-  // Fallback to default static QRIS if neither image nor payload is provided
-  if (!finalQrisPayload) {
+  // [EMPLOYR PATCH P2] Tidak ada QRIS tiruan sebagai cadangan. Payload wajib sah (struktur + CRC + field wajib),
+  // kecuali mode sandbox, di mana QRIS contoh tetap boleh dipakai untuk uji coba.
+  const sandboxOnly = Deno.env.get("SANDBOX_MODE") === "true";
+  if (!finalQrisPayload && sandboxOnly) {
     finalQrisPayload = DEFAULT_MOCK_STATIC_QRIS;
+  }
+  if (!sandboxOnly || finalQrisPayload !== DEFAULT_MOCK_STATIC_QRIS) {
+    const qrisCheck = validateStaticQrisPayload(finalQrisPayload);
+    if (!qrisCheck.ok) {
+      if (uploadedQrisPath) await Deno.remove(uploadedQrisPath).catch(() => {});
+      return c.text(`QRIS tidak dapat disimpan: ${describeQrisValidationError(qrisCheck.reason)}`, 400);
+    }
   }
 
   // Process Merchant Logo Upload if provided
   let logoUrl: string | null = null;
   if (logoImage && typeof logoImage === 'object' && typeof logoImage.name === 'string' && logoImage.size > 0) {
-    const logoExt = logoImage.name.split('.').pop() || 'png';
+    const logoExt = safeImageExt(logoImage.name);
     const logoFilePath = `${tempDir}/logo_${newId}.${logoExt}`;
     logoUrl = `/static/uploads/logo_${newId}.${logoExt}`;
     const logoBuffer = await logoImage.arrayBuffer();
@@ -2000,7 +1969,11 @@ app.post('/api/v1/invoices', invoiceApiRateLimiter, async (c) => {
   
   // Scoped Merchant Resolution: If key is strictly bound to a merchant, auto-assign it!
   const rawMerchantId = body.merchant_id;
-  const merchantId = boundApiKeyMerchantId || rawMerchantId || 'mrc_toko_1';
+  // [EMPLOYR PATCH P3] Tanpa merchant bawaan 'mrc_toko_1': merchant harus eksplisit (terikat API key atau dikirim di body).
+  const merchantId = boundApiKeyMerchantId || rawMerchantId;
+  if (!merchantId || typeof merchantId !== 'string') {
+    return c.json({ error: 'merchant_id is required' }, 400);
+  }
 
   // If the API Key was bound to a specific merchant, verify that the caller didn't pass a conflicting merchant_id
   if (boundApiKeyMerchantId && rawMerchantId && rawMerchantId !== boundApiKeyMerchantId) {
@@ -2065,6 +2038,30 @@ app.post('/api/v1/invoices', invoiceApiRateLimiter, async (c) => {
     const expiredAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
     const isSandbox = (body.sandbox === true || body.isSandbox === true || Deno.env.get("SANDBOX_MODE") === "true");
 
+    // [EMPLOYR PATCH P3] Bentuk QR lebih dulu dari QRIS merchant yang SAH, sebelum menulis invoice apa pun.
+    // Upstream menyimpan invoice dulu, lalu memakai QRIS tiruan bila merchant tak punya QRIS, dan menelan
+    // semua galat (catch kosong) sambil tetap membalas "success".
+    const mList = await db.select().from(merchants).where(eq(merchants.id, merchantId));
+    if (mList.length === 0) {
+      return c.json({ error: `Merchant '${merchantId}' tidak ditemukan.` }, 404);
+    }
+    let staticPayload = mList[0].qrisPayload;
+    if (isSandbox && !staticPayload) {
+      staticPayload = DEFAULT_MOCK_STATIC_QRIS; // QRIS contoh hanya untuk invoice sandbox
+    } else {
+      const merchantQris = validateStaticQrisPayload(staticPayload);
+      if (!merchantQris.ok) {
+        console.error(`[Invoice] Merchant ${merchantId} tidak punya QRIS yang sah (${merchantQris.reason}); invoice ditolak.`);
+        return c.json({
+          error: `Merchant '${merchantId}' belum punya QRIS yang sah. ${describeQrisValidationError(merchantQris.reason)}`
+        }, 409);
+      }
+    }
+    dynamicQrisString = generateDynamicQRIS(staticPayload, totalAmount, newInvoiceId);
+    if (!dynamicQrisString) {
+      throw new Error('QRIS dinamis gagal dibentuk');
+    }
+
     await db.insert(invoices).values({
       id: newInvoiceId,
       merchantId,
@@ -2084,14 +2081,10 @@ app.post('/api/v1/invoices', invoiceApiRateLimiter, async (c) => {
       expiredAt,
       isSandbox
     });
-
-    // Fetch the merchant to get their static QRIS payload
-    const mList = await db.select().from(merchants).where(eq(merchants.id, merchantId));
-    const staticPayload = (mList.length > 0 && mList[0].qrisPayload) 
-      ? mList[0].qrisPayload 
-      : DEFAULT_MOCK_STATIC_QRIS;
-    dynamicQrisString = generateDynamicQRIS(staticPayload, totalAmount, newInvoiceId);
-  } catch (_e) {}
+  } catch (err: any) {
+    console.error('[Invoice] Pembuatan invoice gagal:', err);
+    return c.json({ error: 'Invoice gagal dibuat. Coba lagi.' }, 500);
+  }
 
   if (dynamicQrisString) {
     sseBroker.publishTransactionUpdate({
@@ -2213,7 +2206,13 @@ app.get('/pay/:id', async (c) => {
     const merchant = mrcList[0];
 
     // Generate Dynamic QRIS payload
-    const staticPayload = merchant.qrisPayload ? merchant.qrisPayload : DEFAULT_MOCK_STATIC_QRIS;
+    // [EMPLOYR PATCH P2] Tidak ada QRIS tiruan di halaman bayar; hanya invoice sandbox yang boleh memakainya.
+    let staticPayload = merchant.qrisPayload;
+    if (!staticPayload && invoice.isSandbox) {
+      staticPayload = DEFAULT_MOCK_STATIC_QRIS;
+    } else if (!validateStaticQrisPayload(staticPayload).ok && !(invoice.isSandbox && staticPayload === DEFAULT_MOCK_STATIC_QRIS)) {
+      return c.text('QRIS merchant belum valid. Hubungi penjual.', 409);
+    }
     const dynamicQrisString = generateDynamicQRIS(staticPayload, invoice.totalAmount, invoice.id);
 
     // Generate QR code SVG
@@ -2361,7 +2360,10 @@ app.get('/api/v1/invoices/:id/status', invoiceStatusRateLimiter, async (c) => {
 });
 
 // API: Manual Invoice Reconciliation (Force Match via GoBiz Transaction ID or Instant Confirm)
-app.post('/api/v1/invoices/:id/reconcile', async (c) => {
+// [EMPLOYR PATCH P7] Endpoint ini menandai invoice LUNAS dan memicu webhook yang sah, tetapi di upstream
+// tidak punya autentikasi (middleware melewatkan seluruh awalan /api/v1/invoices). Sekarang wajib sesi
+// admin yang masuk, dan admin hanya boleh menyentuh invoice milik merchant yang ia kelola.
+app.post('/api/v1/invoices/:id/reconcile', requireRole(['SUPER_ADMIN', 'ADMIN', 'REGIONAL_ADMIN']), async (c) => {
   const id = c.req.param('id');
   try {
     const invList = await db.select().from(invoices).where(eq(invoices.id, id));
@@ -2369,6 +2371,18 @@ app.post('/api/v1/invoices/:id/reconcile', async (c) => {
       return c.json({ success: false, error: 'Invoice not found' }, 404);
     }
     const invoice = invList[0];
+
+    // [EMPLOYR PATCH P7] Admin regional hanya boleh menyentuh invoice merchant yang ia kelola.
+    const reconcileUser = (c as any).get('user') as UserSession;
+    if (reconcileUser.role === 'REGIONAL_ADMIN') {
+      const managed = await db.select({ merchantId: regionalAdminMerchants.merchantId })
+        .from(regionalAdminMerchants)
+        .where(eq(regionalAdminMerchants.userId, reconcileUser.id));
+      if (!invoice.merchantId || !managed.some((m) => m.merchantId === invoice.merchantId)) {
+        return c.json({ success: false, error: 'Forbidden: You do not manage this merchant account' }, 403);
+      }
+    }
+
     if (invoice.status === 'PAID') {
       return c.json({ success: true, message: 'Invoice already PAID', invoice });
     }

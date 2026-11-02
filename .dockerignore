@@ -1,5 +1,8 @@
 # Git files
 .git
+.github
+# Dependencies are resolved inside the image, never copied from the host
+node_modules/
 .gitignore
 
 # Environment and sensitive data

@@ -1,18 +1,27 @@
-version: '3.8'
-
+# [EMPLOYR PATCH P8] Perbedaan dari upstream:
+# - image dari registry sendiri, wajib diisi lewat QBIZ_IMAGE (disarankan pakai digest: ...@sha256:...), bukan :latest upstream
+# - port Postgres TIDAK dipublikasikan (hanya dapat dijangkau dari jaringan compose)
+# - port web hanya di 127.0.0.1 secara bawaan (taruh reverse proxy HTTPS di depannya)
+# - variabel admin awal / webhook / sandbox diteruskan secara eksplisit
+# - setiap entri environment diberi tanda kutip: pesan ":?" berisi ": " membuat YAML mengurainya sebagai map (compose upstream gagal di sini)
 services:
   web:
-    image: ghcr.io/ardianryan/qbiz-qrisdinamis:latest
-    build: .
+    image: "${QBIZ_IMAGE:?QBIZ_IMAGE must be set to the digest-pinned image, see .env.example}"
     container_name: qbiz-qris-app
     restart: always
     ports:
-      - "${PORT:-8000}:8000"
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8000}:8000"
     environment:
-      - DATABASE_URL=postgres://${DB_USER:-qbiz_user}:${DB_PASSWORD:?Error: DB_PASSWORD must be configured in .env}@db:5432/${DB_NAME:-qrispaymti}
-      - COOKIE_SECRET=${COOKIE_SECRET:?Error: COOKIE_SECRET must be configured in .env}
-      - JWT_SECRET=${JWT_SECRET:?Error: JWT_SECRET must be configured in .env}
-      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+      - "DATABASE_URL=postgres://${DB_USER:-qbiz_user}:${DB_PASSWORD:?DB_PASSWORD must be set in .env}@db:5432/${DB_NAME:-qrispaymti}"
+      - "COOKIE_SECRET=${COOKIE_SECRET:?COOKIE_SECRET must be set in .env}"
+      - "JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set in .env}"
+      - "WEBHOOK_SECRET=${WEBHOOK_SECRET:-}"
+      - "BASE_URL=${BASE_URL:-}"
+      - "INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-}"
+      - "INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-}"
+      - "SANDBOX_MODE=${SANDBOX_MODE:-false}"
+      - "ENABLE_API_DOCS=${ENABLE_API_DOCS:-false}"
+      - "PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium"
     depends_on:
       db:
         condition: service_healthy
@@ -25,11 +34,9 @@ services:
     container_name: qbiz-qris-db
     restart: always
     environment:
-      - POSTGRES_DB=${DB_NAME:-qrispaymti}
-      - POSTGRES_USER=${DB_USER:-qbiz_user}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:?Error: DB_PASSWORD must be configured in .env}
-    ports:
-      - "5432:5432"
+      - "POSTGRES_DB=${DB_NAME:-qrispaymti}"
+      - "POSTGRES_USER=${DB_USER:-qbiz_user}"
+      - "POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in .env}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

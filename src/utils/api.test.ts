@@ -3,8 +3,17 @@ import { db } from "../../db/db.ts";
 import { merchants, invoices, users } from "../../db/schema.ts";
 import { eq } from "drizzle-orm";
 import { app } from "../../main.tsx";
+import { computeCRC16 } from "./qris.ts";
 
-const API_KEY = "qbiz_api_key_live_2026_w8a2b3d9x7c"; // Super Admin API Key
+// Kunci uji acak per proses. Bukan kunci bawaan: fork Employr tidak punya akun/kunci seed.
+const API_KEY = "qbiz_test_" + crypto.randomUUID().replace(/-/g, "");
+
+/** QRIS statis uji yang sah (struktur + CRC dihitung). */
+function buildValidTestQris(): string {
+  const f = (tag: string, v: string) => `${tag}${v.length.toString().padStart(2, "0")}${v}`;
+  const body = f("00", "01") + f("01", "11") + f("26", "0014ID.CO.QRIS.WWW0215ID1234567890123") + f("52", "5812") + f("53", "360") + f("58", "ID") + f("59", "Toko Uji Employr") + f("60", "JAKARTA") + f("61", "10110");
+  return body + "6304" + computeCRC16(body + "6304");
+}
 
 Deno.test("API - GET /login should return login page", async () => {
   const res = await app.request("/login");
@@ -59,7 +68,7 @@ Deno.test("API - POST /api/v1/invoices and GET /pay/:id integration test", async
       name: "Test Integration Merchant",
       phoneNumber: "08123456789",
       qrisImageUrl: "/static/uploads/test.png",
-      qrisPayload: "00020101021151240016ID.CO.QRIS.WWW020412346304ABCD",
+      qrisPayload: buildValidTestQris(),
       logoUrl: "/static/uploads/logo_test.png",
       sessionFilePath: "sessions/mrc_test_integration.json",
       status: "ACTIVE"
@@ -237,3 +246,55 @@ Deno.test("Merchant Management - should reject unauthenticated merchant creation
 });
 
 
+
+// ---------------------------------------------------------------------------
+// Regresi untuk patch Employr (lihat PATCHES.md)
+// ---------------------------------------------------------------------------
+
+Deno.test("Employr P7 - reconcile must reject unauthenticated callers", async () => {
+  const res = await app.request("/api/v1/invoices/inv_does_not_matter/reconcile", { method: "POST" });
+  assertEquals(res.status === 401 || res.status === 403, true);
+});
+
+Deno.test("Employr P5 - /docs is disabled unless ENABLE_API_DOCS=true", async () => {
+  const res = await app.request("/docs");
+  assertEquals(res.status, 404);
+});
+
+Deno.test("Employr P2/P3 - invoice creation fails closed when merchant QRIS is missing or invalid", async () => {
+  const userId = "usr_test_fail_closed_admin";
+  const key = "qbiz_test_" + crypto.randomUUID().replace(/-/g, "");
+  const noQrisId = "mrc_test_no_qris";
+  const badQrisId = "mrc_test_bad_qris";
+  await db.insert(users).values({
+    id: userId, name: "Fail Closed Admin", email: `fc-${crypto.randomUUID()}@qbiz.internal`,
+    password: "pbkdf2_hashed_dummy_password", role: "SUPER_ADMIN", apiKey: key,
+  });
+  const baseMerchant = { phoneNumber: "08123456789", qrisImageUrl: "", status: "ACTIVE" as const };
+  await db.insert(merchants).values({ id: noQrisId, name: "Tanpa QRIS", sessionFilePath: "sessions/x1.json", ...baseMerchant });
+  await db.insert(merchants).values({
+    id: badQrisId, name: "QRIS Rusak", sessionFilePath: "sessions/x2.json", ...baseMerchant,
+    qrisPayload: "00020101021151240016ID.CO.QRIS.WWW020412346304ABCD",
+  });
+  const post = (body: Record<string, unknown>) => app.request("/api/v1/invoices", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  try {
+    const none = await post({ order_id: `ORD-NQ-${Date.now()}`, amount: 10000, merchant_id: noQrisId });
+    assertEquals(none.status, 409);
+    const bad = await post({ order_id: `ORD-BQ-${Date.now()}`, amount: 10000, merchant_id: badQrisId });
+    assertEquals(bad.status, 409);
+    const noMerchant = await post({ order_id: `ORD-NM-${Date.now()}`, amount: 10000 });
+    assertEquals(noMerchant.status, 400);
+    const leftovers = await db.select().from(invoices).where(eq(invoices.merchantId, noQrisId));
+    assertEquals(leftovers.length, 0); // tidak ada invoice yatim yang tertulis
+  } finally {
+    await db.delete(invoices).where(eq(invoices.merchantId, noQrisId));
+    await db.delete(invoices).where(eq(invoices.merchantId, badQrisId));
+    await db.delete(merchants).where(eq(merchants.id, noQrisId));
+    await db.delete(merchants).where(eq(merchants.id, badQrisId));
+    await db.delete(users).where(eq(users.id, userId));
+  }
+});
